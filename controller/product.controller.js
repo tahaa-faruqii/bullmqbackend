@@ -4,6 +4,8 @@ const {
   maxBulkProducts,
   getBulkJobWaitMs,
   jobWaitMsBase,
+  listStreamThreshold,
+  listStreamBatchSize,
 } = require("../config/limits");
 
 const waitForJob = async (job, waitMs = jobWaitMsBase) => {
@@ -63,12 +65,54 @@ const deleteProduct = async (req, res) => {
   }
 };
 
-const getAllProducts = async (_req, res) => {
+const getAllProducts = async (req, res) => {
   try {
-    const products = await Product.find().sort({ createdAt: -1 });
-    res.status(200).json(products);
+    const total = await Product.countDocuments();
+
+    if (total <= listStreamThreshold) {
+      const products = await Product.find().sort({ createdAt: -1 }).lean();
+      return res.status(200).json(products);
+    }
+
+    const batchSize = Math.min(
+      listStreamBatchSize,
+      Math.max(50, Math.ceil(total / 50)),
+    );
+
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.status(200);
+
+    const cursor = Product.find()
+      .sort({ createdAt: -1 })
+      .lean()
+      .cursor({ batchSize });
+
+    const closeCursor = () => {
+      cursor.close().catch(() => {});
+    };
+    req.on("close", closeCursor);
+    res.on("close", closeCursor);
+
+    res.write("[");
+    let first = true;
+
+    for await (const doc of cursor) {
+      if (res.writableEnded) break;
+      if (!first) res.write(",");
+      first = false;
+      res.write(JSON.stringify(doc));
+    }
+
+    if (!res.writableEnded) {
+      res.write("]");
+      res.end();
+    }
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    if (!res.headersSent) {
+      res.status(500).json({ message: error.message });
+    } else if (!res.writableEnded) {
+      res.end();
+    }
   }
 };
 
