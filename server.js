@@ -1,8 +1,7 @@
-require("dotenv").config();
 const app = require("./app");
 
 const connectDB = require("./config/db");
-connectDB();
+connectDB().catch((err) => console.error("Mongo DB connection error", err));
 
 require("./workers/product.worker");
 
