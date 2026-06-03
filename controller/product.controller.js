@@ -1,9 +1,10 @@
 const Product = require("../models/product.model");
+const { Job } = require("bullmq");
 const { resolveDbError, DB_UNAVAILABLE } = require("../config/db");
+const { bulkInsertProducts } = require("../services/bulkImport.service");
 const { productQueue, queueEvents } = require("../queues/product.queue");
 const {
   maxBulkProducts,
-  getBulkJobWaitMs,
   jobWaitMsBase,
   listStreamThreshold,
   listStreamBatchSize,
@@ -120,7 +121,6 @@ const getAllProducts = async (req, res) => {
 };
 
 const bulkCreateProducts = async (req, res) => {
-  let job;
   try {
     const { products } = req.body;
     if (!Array.isArray(products) || products.length === 0) {
@@ -135,12 +135,54 @@ const bulkCreateProducts = async (req, res) => {
       });
     }
 
-    const waitMs = getBulkJobWaitMs(products.length);
-    job = await productQueue.add("bulkCreate", { products });
-    const result = await waitForJob(job, waitMs);
-    res.status(201).json(result);
+    if (process.env.VERCEL) {
+      const result = await bulkInsertProducts(products);
+      return res.status(201).json(result);
+    }
+
+    const job = await productQueue.add("bulkCreate", { products });
+    res.status(202).json({
+      message: "Bulk import started",
+      jobId: job.id,
+      status: "processing",
+      total: products.length,
+    });
   } catch (error) {
-    handleQueueError(res, error, job?.id);
+    handleQueueError(res, error);
+  }
+};
+
+const getBulkJobStatus = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const job = await Job.fromId(productQueue, jobId);
+
+    if (!job) {
+      return res.status(404).json({ message: "Job not found" });
+    }
+
+    const state = await job.getState();
+
+    if (state === "completed") {
+      return res.status(200).json({
+        status: state,
+        ...(job.returnvalue || {}),
+      });
+    }
+
+    if (state === "failed") {
+      return res.status(200).json({
+        status: state,
+        message: job.failedReason || "Bulk job failed",
+      });
+    }
+
+    const progress =
+      typeof job.progress === "number" ? job.progress : undefined;
+
+    return res.status(200).json({ status: state, progress });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
 
@@ -165,4 +207,5 @@ module.exports = {
   getAllProducts,
   bulkCreateProducts,
   bulkDeleteProducts,
+  getBulkJobStatus,
 };

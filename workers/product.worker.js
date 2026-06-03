@@ -1,6 +1,7 @@
 const { Worker } = require("bullmq");
 const Product = require("../models/product.model");
 const { connection } = require("../config/bullmq");
+const { bulkInsertProducts } = require("../services/bulkImport.service");
 const { PRODUCT_QUEUE_NAME } = require("../queues/product.queue");
 
 const processProductJob = async (job) => {
@@ -37,26 +38,9 @@ const processProductJob = async (job) => {
     }
     case "bulkCreate": {
       const { products } = data;
-      const created = [];
-      const failed = [];
-
-      for (const item of products) {
-        try {
-          const product = await Product.create({
-            name: item.name,
-            price: item.price,
-            description: item.description ?? "",
-          });
-          created.push(product);
-        } catch (err) {
-          failed.push({
-            name: item.name,
-            message: err.message,
-          });
-        }
-      }
-
-      return { created, failed };
+      return bulkInsertProducts(products, (progress) =>
+        job.updateProgress(progress),
+      );
     }
     case "bulkDelete": {
       const { deletedCount } = await Product.deleteMany({});
@@ -70,7 +54,7 @@ const processProductJob = async (job) => {
 const productWorker = new Worker(PRODUCT_QUEUE_NAME, processProductJob, {
   connection,
   concurrency: 5,
-  lockDuration: 60000,
+  lockDuration: 300000,
 });
 
 productWorker.on("failed", (job, err) => {

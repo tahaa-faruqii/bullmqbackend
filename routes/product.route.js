@@ -7,9 +7,11 @@ const {
   getAllProducts,
   bulkCreateProducts,
   bulkDeleteProducts,
+  getBulkJobStatus,
 } = require("../controller/product.controller");
 
 router.get("/", getAllProducts);
+router.get("/jobs/:jobId", getBulkJobStatus);
 router.post("/bulk", bulkCreateProducts);
 router.delete("/bulk", bulkDeleteProducts);
 router.post("/", createProduct);
