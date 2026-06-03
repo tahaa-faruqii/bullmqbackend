@@ -1,4 +1,5 @@
 const Product = require("../models/product.model");
+const { isDbConnected, resolveDbError, DB_UNAVAILABLE } = require("../config/db");
 const { productQueue, queueEvents } = require("../queues/product.queue");
 const {
   maxBulkProducts,
@@ -67,6 +68,10 @@ const deleteProduct = async (req, res) => {
 
 const getAllProducts = async (req, res) => {
   try {
+    if (!isDbConnected()) {
+      return res.status(503).json({ message: DB_UNAVAILABLE });
+    }
+
     const total = await Product.countDocuments();
 
     if (total <= listStreamThreshold) {
@@ -109,7 +114,9 @@ const getAllProducts = async (req, res) => {
     }
   } catch (error) {
     if (!res.headersSent) {
-      res.status(500).json({ message: error.message });
+      const message = resolveDbError(error);
+      const status = message === DB_UNAVAILABLE ? 503 : 500;
+      res.status(status).json({ message });
     } else if (!res.writableEnded) {
       res.end();
     }
