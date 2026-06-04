@@ -10,6 +10,12 @@ const {
   getBulkJobStatus,
 } = require("../controller/product.controller");
 
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    message: "Server is running",
+  });
+});
 router.get("/", getAllProducts);
 router.get("/jobs/:jobId", getBulkJobStatus);
 router.post("/bulk", bulkCreateProducts);
