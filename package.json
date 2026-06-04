@@ -13,6 +13,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@upstash/redis": "^1.38.0",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.34.5",
     "cors": "^2.8.6",

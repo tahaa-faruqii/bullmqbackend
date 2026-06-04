@@ -1,4 +1,4 @@
-const { Queue, QueueEvents } = require("bullmq");
+const { Queue } = require("bullmq");
 const { connection } = require("../config/bullmq");
 
 const PRODUCT_QUEUE_NAME = "product";
@@ -9,8 +9,8 @@ const defaultJobOptions = {
     type: "exponential",
     delay: 2000,
   },
-  removeOnComplete: false,
-  removeOnFail: false,
+  removeOnComplete: { age: 86400 },
+  removeOnFail: { age: 86400 },
 };
 
 const productQueue = new Queue(PRODUCT_QUEUE_NAME, {
@@ -18,10 +18,7 @@ const productQueue = new Queue(PRODUCT_QUEUE_NAME, {
   defaultJobOptions,
 });
 
-const queueEvents = new QueueEvents(PRODUCT_QUEUE_NAME, { connection });
-
 module.exports = {
   productQueue,
-  queueEvents,
   PRODUCT_QUEUE_NAME,
 };

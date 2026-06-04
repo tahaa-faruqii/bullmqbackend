@@ -14,9 +14,27 @@ const CHUNK_SIZE = 10; // process 10 records per job
 const MAX_BULK_LIMIT = 5000; // safety limit
 
 const isRedisError = (error) =>
-  /redis|upstash|ECONNREFUSED|ENOTFOUND|connect EPERM|Connection is closed/i.test(
+  /redis|upstash|ECONNREFUSED|ENOTFOUND|connect EPERM|Connection is closed|Queue timeout|REDIS_URL/i.test(
     error?.message || "",
   );
+
+const QUEUE_ADD_TIMEOUT_MS = 15000;
+
+async function addQueueJob(name, data, options = {}) {
+  const addPromise = productQueue.add(name, data, options);
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(
+      () =>
+        reject(
+          new Error(
+            "Queue timeout. Add REDIS_URL (Upstash TCP rediss:// URL) on Railway.",
+          ),
+        ),
+      QUEUE_ADD_TIMEOUT_MS,
+    );
+  });
+  return Promise.race([addPromise, timeoutPromise]);
+}
 
 const handleError = (res, error) => {
   if (error.message === "Product not found") {
@@ -180,7 +198,7 @@ const bulkCreateProducts = async (req, res) => {
     for (let i = 0; i < total; i += CHUNK_SIZE) {
       const chunk = products.slice(i, i + CHUNK_SIZE);
 
-      const job = await productQueue.add(
+      const job = await addQueueJob(
         "bulkCreate",
         { products: chunk },
         {
@@ -261,6 +279,44 @@ const bulkCreateProducts = async (req, res) => {
 
 const getBulkJobStatus = async (req, res) => {
   try {
+    const { jobId } = req.params;
+
+    if (jobId) {
+      const job = await Job.fromId(productQueue, jobId);
+
+      if (!job) {
+        return res.status(404).json({
+          message: "Job not found",
+          jobId,
+          code: "JOB_NOT_FOUND",
+        });
+      }
+
+      const state = await job.getState();
+
+      if (state === "completed") {
+        return res.status(200).json({
+          status: state,
+          jobId,
+          ...(job.returnvalue || {}),
+        });
+      }
+
+      if (state === "failed") {
+        return res.status(200).json({
+          status: state,
+          jobId,
+          message: job.failedReason || "Job failed",
+          code: "JOB_FAILED",
+        });
+      }
+
+      const progress =
+        typeof job.progress === "number" ? job.progress : undefined;
+
+      return res.status(200).json({ status: state, jobId, progress });
+    }
+
     const { jobIds } = req.body;
 
     if (!Array.isArray(jobIds) || jobIds.length === 0) {
@@ -305,7 +361,7 @@ const getBulkJobStatus = async (req, res) => {
 
 const bulkDeleteProducts = async (_req, res) => {
   try {
-    const job = await productQueue.add(
+    const job = await addQueueJob(
       "bulkDelete",
       {},
       {
