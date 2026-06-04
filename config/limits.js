@@ -1,4 +1,3 @@
-const maxBulkProducts = Number(process.env.MAX_BULK_PRODUCTS) || 1000000;
 const jsonBodyLimit = process.env.JSON_BODY_LIMIT || "1gb";
 
 const listStreamThreshold = Number(process.env.LIST_STREAM_THRESHOLD) || 500;
@@ -16,7 +15,6 @@ function getBulkJobWaitMs(productCount) {
 
 module.exports = {
   jsonBodyLimit,
-  maxBulkProducts,
   listStreamThreshold,
   listStreamBatchSize,
   jobWaitMsBase,

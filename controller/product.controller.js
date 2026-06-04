@@ -1,20 +1,57 @@
 const Product = require("../models/product.model");
+const { Job } = require("bullmq");
 const { resolveDbError, DB_UNAVAILABLE } = require("../config/db");
-const { bulkInsertProducts } = require("../services/bulkImport.service");
+const { productQueue } = require("../queues/product.queue");
 const {
-  maxBulkProducts,
   listStreamThreshold,
   listStreamBatchSize,
 } = require("../config/limits");
+
+const REDIS_UNAVAILABLE =
+  "Queue service unavailable. Check Redis connection and try again.";
+
+const CHUNK_SIZE = 10; // process 10 records per job
+const MAX_BULK_LIMIT = 5000; // safety limit
+
+const isRedisError = (error) =>
+  /redis|upstash|ECONNREFUSED|ENOTFOUND|connect EPERM|Connection is closed/i.test(
+    error?.message || "",
+  );
 
 const handleError = (res, error) => {
   if (error.message === "Product not found") {
     return res.status(404).json({ message: error.message });
   }
 
+  if (isRedisError(error)) {
+    return res.status(503).json({ message: REDIS_UNAVAILABLE });
+  }
+
   const message = resolveDbError(error);
   const status = message === DB_UNAVAILABLE ? 503 : 500;
   res.status(status).json({ message });
+};
+
+const handleQueueError = (res, error, jobId) => {
+  if (isRedisError(error)) {
+    return res.status(503).json({ message: REDIS_UNAVAILABLE });
+  }
+
+  if (error.message?.includes("timed out") && jobId) {
+    return res.status(202).json({
+      message: "Job is still processing",
+      jobId,
+      status: "processing",
+    });
+  }
+
+  if (error.message === "Product not found") {
+    return res.status(404).json({ message: error.message });
+  }
+
+  const message = resolveDbError(error);
+  const status = message === DB_UNAVAILABLE ? 503 : 500;
+  res.status(status).json({ message: error.message || message });
 };
 
 const createProduct = async (req, res) => {
@@ -116,36 +153,189 @@ const getAllProducts = async (req, res) => {
 const bulkCreateProducts = async (req, res) => {
   try {
     const { products } = req.body;
-    if (!Array.isArray(products) || products.length === 0) {
-      return res.status(400).json({ message: "products array is required" });
-    }
 
-    if (products.length > maxBulkProducts) {
+    if (!Array.isArray(products)) {
       return res.status(400).json({
-        message: `Too many products (${products.length}). Maximum ${maxBulkProducts} per upload. Split your file and try again.`,
-        maxProducts: maxBulkProducts,
-        received: products.length,
+        message: "products must be an array",
+        code: "INVALID_BODY",
       });
     }
 
-    const result = await bulkInsertProducts(products);
-    res.status(201).json(result);
+    if (products.length === 0) {
+      return res.status(400).json({
+        message: "products array cannot be empty",
+        code: "EMPTY_PRODUCTS",
+      });
+    }
+
+    if (products.length > MAX_BULK_LIMIT) {
+      return res.status(400).json({
+        message: `Bulk import limit exceeded. Maximum allowed: ${MAX_BULK_LIMIT}`,
+        code: "BULK_LIMIT_EXCEEDED",
+      });
+    }
+    const total = products.length;
+    const jobs = [];
+
+    for (let i = 0; i < total; i += CHUNK_SIZE) {
+      const chunk = products.slice(i, i + CHUNK_SIZE);
+
+      const job = await productQueue.add(
+        "bulkCreate",
+        { products: chunk },
+        {
+          attempts: 3,
+          backoff: { type: "exponential", delay: 3000 },
+          removeOnComplete: { age: 86400 },
+          removeOnFail: { age: 86400 },
+        },
+      );
+      jobs.push(job.id);
+    }
+
+    return res.status(202).json({
+      message: "Bulk import queued",
+      totalRecords: total,
+      totalChunks: jobs.length,
+      chunkSize: CHUNK_SIZE,
+      jobIds: jobs,
+      status: "processing",
+    });
   } catch (error) {
-    handleError(res, error);
+    handleQueueError(res, error);
+  }
+};
+
+// const getBulkJobStatus = async (req, res) => {
+//   try {
+//     const { jobId } = req.params;
+
+//     if (!jobId) {
+//       return res.status(400).json({
+//         message: "jobId is required",
+//         code: "MISSING_JOB_ID",
+//       });
+//     }
+
+//     const job = await Job.fromId(productQueue, jobId);
+
+//     if (!job) {
+//       return res.status(404).json({
+//         message: "Job not found",
+//         jobId,
+//         code: "JOB_NOT_FOUND",
+//       });
+//     }
+
+//     const state = await job.getState();
+
+//     if (state === "completed") {
+//       return res.status(200).json({
+//         status: state,
+//         jobId,
+//         ...(job.returnvalue || {}),
+//       });
+//     }
+
+//     if (state === "failed") {
+//       return res.status(200).json({
+//         status: state,
+//         jobId,
+//         message: job.failedReason || "Bulk import failed",
+//         code: "JOB_FAILED",
+//       });
+//     }
+
+//     const progress =
+//       typeof job.progress === "number" ? job.progress : undefined;
+
+//     return res.status(200).json({
+//       status: state,
+//       jobId,
+//       progress,
+//     });
+//   } catch (error) {
+//     handleQueueError(res, error);
+//   }
+// };
+
+const getBulkJobStatus = async (req, res) => {
+  try {
+    const { jobIds } = req.body;
+
+    if (!Array.isArray(jobIds) || jobIds.length === 0) {
+      return res.status(400).json({
+        message: "jobIds must be a non-empty array",
+        code: "INVALID_JOB_IDS",
+      });
+    }
+
+    const results = [];
+
+    for (const jobId of jobIds) {
+      const job = await Job.fromId(productQueue, jobId);
+
+      if (!job) {
+        results.push({
+          jobId,
+          status: "not_found",
+        });
+        continue;
+      }
+
+      const state = await job.getState();
+
+      results.push({
+        jobId,
+        status: state,
+        progress: typeof job.progress === "number" ? job.progress : undefined,
+        result: state === "completed" ? job.returnvalue : undefined,
+        error: state === "failed" ? job.failedReason : undefined,
+      });
+    }
+
+    return res.status(200).json({
+      totalJobs: jobIds.length,
+      jobs: results,
+    });
+  } catch (error) {
+    handleQueueError(res, error);
   }
 };
 
 const bulkDeleteProducts = async (_req, res) => {
   try {
-    const { deletedCount } = await Product.deleteMany({});
-    res.status(200).json({
-      message: `${deletedCount} product${deletedCount === 1 ? "" : "s"} deleted.`,
-      deletedCount,
+    const job = await productQueue.add(
+      "bulkDelete",
+      {},
+      {
+        attempts: 2,
+        removeOnComplete: { age: 3600 },
+        removeOnFail: { age: 86400 },
+      },
+    );
+
+    return res.status(202).json({
+      message: "Bulk delete queued",
+      jobId: job.id,
+      status: "processing",
     });
   } catch (error) {
-    handleError(res, error);
+    handleQueueError(res, error);
   }
 };
+
+// const bulkDeleteProducts = async (_req, res) => {
+//   try {
+//     const { deletedCount } = await Product.deleteMany({});
+//     res.status(200).json({
+//       message: `${deletedCount} product${deletedCount === 1 ? "" : "s"} deleted.`,
+//       deletedCount,
+//     });
+//   } catch (error) {
+//     handleError(res, error);
+//   }
+// };
 
 module.exports = {
   createProduct,
@@ -154,4 +344,5 @@ module.exports = {
   getAllProducts,
   bulkCreateProducts,
   bulkDeleteProducts,
+  getBulkJobStatus,
 };
