@@ -10,7 +10,7 @@ const {
   getBulkJobStatus,
 } = require("../controller/product.controller");
 
-app.get("/health", (req, res) => {
+router.get("/health", (req, res) => {
   res.status(200).json({
     status: "ok",
     message: "Server is running",
