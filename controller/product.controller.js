@@ -11,7 +11,7 @@ const REDIS_UNAVAILABLE =
   "Queue service unavailable. Check Redis connection and try again.";
 
 const CHUNK_SIZE = 10; // process 10 records per job
-const MAX_BULK_LIMIT = 5000; // safety limit
+const MAX_BULK_LIMIT = 10000; // safety limit
 
 const isRedisError = (error) =>
   /redis|upstash|ECONNREFUSED|ENOTFOUND|connect EPERM|Connection is closed|Queue timeout|REDIS_URL/i.test(
